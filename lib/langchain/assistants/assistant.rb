@@ -128,7 +128,8 @@ module Langchain
         messages: thread.openai_messages,
         tools: tools.map(&:to_openai_tool),
         # TODO: Not sure that tool_choice should always be "auto"; Maybe we can let the user toggle it.
-        tool_choice: "auto"
+        tool_choice: "auto",
+        response_format: {type: "json_object"}
       )
     end
 
