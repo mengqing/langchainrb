@@ -28,6 +28,7 @@ if ENV["POSTGRES_URL"]
         ).to receive(:embeddings)
           .with(
             parameters: {
+              dimensions: 1536,
               model: "text-embedding-ada-002",
               input: "Hello World"
             }
@@ -61,6 +62,7 @@ if ENV["POSTGRES_URL"]
           ).to receive(:embeddings)
             .with(
               parameters: {
+                dimensions: 1536,
                 model: "text-embedding-ada-002",
                 input: input
               }
@@ -103,6 +105,7 @@ if ENV["POSTGRES_URL"]
         ).to receive(:embeddings)
           .with(
             parameters: {
+              dimensions: 1536,
               model: "text-embedding-ada-002",
               input: "earth"
             }
@@ -162,7 +165,7 @@ if ENV["POSTGRES_URL"]
     describe "#ask" do
       let(:question) { "How many times is 'lorem' mentioned in this text?" }
       let(:text) { "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed non risus. Suspendisse lectus tortor, dignissim sit amet, adipiscing nec, ultricies sed, dolor." }
-      let(:prompt) { "Context:\n#{text}\n---\nQuestion: #{question}\n---\nAnswer:" }
+      let(:messages) { [{role: "user", content: "Context:\n#{text}\n---\nQuestion: #{question}\n---\nAnswer:"}] }
       let(:response) { double(completion: answer) }
       let(:answer) { "5 times" }
       let(:k) { 4 }
@@ -173,6 +176,7 @@ if ENV["POSTGRES_URL"]
         ).to receive(:embeddings)
           .with(
             parameters: {
+              dimensions: 1536,
               model: "text-embedding-ada-002",
               input: question
             }
@@ -191,7 +195,7 @@ if ENV["POSTGRES_URL"]
 
       context "without block" do
         before do
-          allow(subject.llm).to receive(:chat).with(prompt: prompt).and_return(response)
+          allow(subject.llm).to receive(:chat).with(messages: messages).and_return(response)
           expect(response).to receive(:context=).with(text)
         end
 

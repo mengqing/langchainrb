@@ -1,4 +1,28 @@
 ## [Unreleased]
+- `Langchain::LLM::Ollama` can now `#summarize`
+
+## [0.9.4]
+- New `Ollama#summarize()` method
+- Improved README
+- Fixes + specs
+
+## [0.9.3]
+- Add EML processor
+- Tools can support multiple-methods
+- Bump gems and bug fixes
+
+## [0.9.2]
+- Fix vectorsearch#ask methods
+- Bump cohere-ruby gem
+
+## [0.9.1]
+- Add support for new OpenAI models
+- Add Ollama#chat method
+- Fix and refactor of `Langchain::LLM::Ollama`, responses can now be streamed.
+
+## [0.9.0]
+- Introducing new `Langchain::Assistant` that will be replacing `Langchain::Conversation` and `Langchain::Agent`s.
+- `Langchain::Conversation` is deprecated.
 
 ## [0.8.2]
 - Introducing new `Langchain::Chunker::Markdown` chunker (thanks @spikex)
