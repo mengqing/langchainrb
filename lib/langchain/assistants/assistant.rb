@@ -75,7 +75,7 @@ module Langchain
           # Run it!
           response = chat_with_llm
 
-          if response.tool_calls
+          if response&.tool_calls
             # Re-run the while(running) loop to process the tool calls
             running = true
             add_message(role: response.role, tool_calls: response.tool_calls)
