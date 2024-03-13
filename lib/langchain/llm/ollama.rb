@@ -62,7 +62,7 @@ module Langchain::LLM
       prompt:,
       model: defaults[:completion_model_name],
       images: nil,
-      format: nil,
+      format: "json",
       system: nil,
       template: nil,
       context: nil,
@@ -159,7 +159,7 @@ module Langchain::LLM
     def chat(
       model: defaults[:chat_completion_model_name],
       messages: [],
-      format: nil,
+      format: "json",
       temperature: defaults[:temperature],
       template: nil,
       stream: false # TODO: Fix streaming.
