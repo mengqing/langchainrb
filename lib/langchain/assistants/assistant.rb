@@ -126,7 +126,7 @@ module Langchain
     #
     # @return [Langchain::LLM::BaseResponse] The LLM response object
     def chat_with_llm
-      params = {messages: thread.openai_messages, response_format: {type: "json_object"}}
+      params = {messages: thread.openai_messages}
 
       if tools.any?
         params[:tools] = tools.map(&:to_openai_tools).flatten
