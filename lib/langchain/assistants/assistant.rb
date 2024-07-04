@@ -35,7 +35,8 @@ module Langchain
       llm:,
       thread: nil,
       tools: [],
-      instructions: nil
+      instructions: nil,
+      stream: nil
     )
       unless SUPPORTED_LLMS.include?(llm.class)
         raise ArgumentError, "Invalid LLM; currently only #{SUPPORTED_LLMS.join(", ")} are supported"
@@ -47,6 +48,7 @@ module Langchain
       @tools = tools
       @instructions = instructions
       @state = :ready
+      @stream = stream
 
       raise ArgumentError, "Thread must be an instance of Langchain::Thread" unless @thread.is_a?(Langchain::Thread)
 
@@ -252,6 +254,7 @@ module Langchain
       Langchain.logger.info("Sending a call to #{llm.class}", for: self.class)
 
       params = {messages: thread.array_of_message_hashes}
+      last_role = params[:messages].last[:role]
 
       if tools.any?
         if llm.is_a?(Langchain::LLM::OpenAI)
@@ -269,7 +272,11 @@ module Langchain
         # TODO: Not sure that tool_choice should always be "auto"; Maybe we can let the user toggle it.
       end
 
-      llm.chat(**params)
+      if @stream && (tools.none? && last_role == "user" || (tools.any? && last_role == "tool"))
+        llm.chat(**params) { |chunk| @stream.call(chunk) }
+      else
+        llm.chat(**params)
+      end
     end
 
     # Run the tools automatically
