@@ -254,7 +254,6 @@ module Langchain
       Langchain.logger.info("Sending a call to #{llm.class}", for: self.class)
 
       params = {messages: thread.array_of_message_hashes}
-      last_role = params[:messages].last[:role]
 
       if tools.any?
         if llm.is_a?(Langchain::LLM::OpenAI)
@@ -272,11 +271,7 @@ module Langchain
         # TODO: Not sure that tool_choice should always be "auto"; Maybe we can let the user toggle it.
       end
 
-      if @stream && (tools.none? && last_role == "user" || (tools.any? && last_role == "tool"))
-        llm.chat(**params) { |chunk| @stream.call(chunk) }
-      else
-        llm.chat(**params)
-      end
+      llm.chat(**params, &@stream)
     end
 
     # Run the tools automatically

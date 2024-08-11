@@ -50,6 +50,8 @@ module Langchain::Tool
       data = client.current_weather(city: city, units: units)
       weather = data.main.map { |key, value| "#{key} #{value}" }.join(", ")
       "The current weather in #{data.name} is #{weather}"
+    rescue Faraday::ResourceNotFound => e
+      e.response[:body]["message"]
     end
   end
 end

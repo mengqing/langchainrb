@@ -17,7 +17,8 @@ module Langchain::LLM
       n: 1,
       temperature: 0.0,
       chat_completion_model_name: "gpt-3.5-turbo",
-      embeddings_model_name: "text-embedding-3-small"
+      embeddings_model_name: "text-embedding-3-small",
+      response_format: "text"
     }.freeze
 
     EMBEDDING_SIZES = {
@@ -44,7 +45,8 @@ module Langchain::LLM
         top_logprobs: {},
         n: {default: @defaults[:n]},
         temperature: {default: @defaults[:temperature]},
-        user: {}
+        user: {},
+        response_format: {default: {type: @defaults[:response_format]}}
       )
       chat_parameters.ignore(:top_k)
     end
@@ -166,7 +168,7 @@ module Langchain::LLM
 
     def with_api_error_handling
       response = yield
-      return if response.empty?
+      return if response.nil? || response.empty?
 
       raise Langchain::LLM::ApiError.new "OpenAI API error: #{response.dig("error", "message")}" if response&.dig("error")
 
