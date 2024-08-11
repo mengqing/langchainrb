@@ -16,14 +16,8 @@ module Langchain
     def_delegators :thread, :messages, :messages=
 
     attr_reader :llm, :thread, :instructions, :state
+    attr_reader :total_prompt_tokens, :total_completion_tokens, :total_tokens
     attr_accessor :tools
-
-    SUPPORTED_LLMS = [
-      Langchain::LLM::Anthropic,
-      Langchain::LLM::OpenAI,
-      Langchain::LLM::GoogleGemini,
-      Langchain::LLM::GoogleVertexAI
-    ]
 
     # Create a new assistant
     #
@@ -38,25 +32,27 @@ module Langchain
       instructions: nil,
       stream: nil
     )
-      unless SUPPORTED_LLMS.include?(llm.class)
-        raise ArgumentError, "Invalid LLM; currently only #{SUPPORTED_LLMS.join(", ")} are supported"
+      unless tools.is_a?(Array) && tools.all? { |tool| tool.class.singleton_class.included_modules.include?(Langchain::ToolDefinition) }
+        raise ArgumentError, "Tools must be an array of objects extending Langchain::ToolDefinition"
       end
-      raise ArgumentError, "Tools must be an array of Langchain::Tool::Base instance(s)" unless tools.is_a?(Array) && tools.all? { |tool| tool.is_a?(Langchain::Tool::Base) }
 
       @llm = llm
+      @llm_adapter = LLM::Adapter.build(llm)
       @thread = thread || Langchain::Thread.new
       @tools = tools
       @instructions = instructions
       @state = :ready
       @stream = stream
 
+      @total_prompt_tokens = 0
+      @total_completion_tokens = 0
+      @total_tokens = 0
+
       raise ArgumentError, "Thread must be an instance of Langchain::Thread" unless @thread.is_a?(Langchain::Thread)
 
       # The first message in the thread should be the system instructions
       # TODO: What if the user added old messages and the system instructions are already in there? Should this overwrite the existing instructions?
-      if llm.is_a?(Langchain::LLM::OpenAI)
-        add_message(role: "system", content: instructions) if instructions
-      end
+      initialize_instructions
       # For Google Gemini, and Anthropic system instructions are added to the `system:` param in the `chat` method
     end
 
@@ -152,7 +148,6 @@ module Langchain
 
     # Handle the current state and transition to the next state
     #
-    # @param state [Symbol] The current state
     # @return [Symbol] The next state
     def handle_state
       case @state
@@ -191,7 +186,6 @@ module Langchain
 
     # Handle LLM message scenario
     #
-    # @param auto_tool_execution [Boolean] Flag to indicate if tools should be executed automatically
     # @return [Symbol] The next state
     def handle_llm_message
       thread.messages.last.tool_calls.any? ? :requires_action : :completed
@@ -210,14 +204,22 @@ module Langchain
     # @return [Symbol] The next state
     def handle_user_or_tool_message
       response = chat_with_llm
-      add_message(role: response.role, content: response.chat_completion, tool_calls: response.tool_calls)
 
+      add_message(role: response.role, content: response.chat_completion, tool_calls: response.tool_calls)
+      record_used_tokens(response.prompt_tokens, response.completion_tokens, response.total_tokens)
+
+      set_state_for(response: response)
+    end
+
+    def set_state_for(response:)
       if response.tool_calls.any?
         :in_progress
       elsif response.chat_completion
         :completed
+      elsif response.completion # Currently only used by Ollama
+        :completed
       else
-        Langchain.logger.error("LLM response does not contain tool calls or chat completion")
+        Langchain.logger.error("LLM response does not contain tool calls, chat or completion response")
         :failed
       end
     end
@@ -229,7 +231,7 @@ module Langchain
       run_tools(thread.messages.last.tool_calls)
       :in_progress
     rescue => e
-      Langchain.logger.error("Error running tools: #{e.message}")
+      Langchain.logger.error("Error running tools: #{e.message}; #{e.backtrace.join('\n')}")
       :failed
     end
 
@@ -238,6 +240,8 @@ module Langchain
     # @return [String] The tool role
     def determine_tool_role
       case llm
+      when Langchain::LLM::Ollama
+        Langchain::Messages::OllamaMessage::TOOL_ROLE
       when Langchain::LLM::OpenAI
         Langchain::Messages::OpenAIMessage::TOOL_ROLE
       when Langchain::LLM::GoogleGemini, Langchain::LLM::GoogleVertexAI
@@ -247,31 +251,24 @@ module Langchain
       end
     end
 
+    def initialize_instructions
+      if llm.is_a?(Langchain::LLM::OpenAI)
+        add_message(role: "system", content: instructions) if instructions
+      end
+    end
+
     # Call to the LLM#chat() method
     #
     # @return [Langchain::LLM::BaseResponse] The LLM response object
     def chat_with_llm
       Langchain.logger.info("Sending a call to #{llm.class}", for: self.class)
 
-      params = {messages: thread.array_of_message_hashes}
-
-      if tools.any?
-        if llm.is_a?(Langchain::LLM::OpenAI)
-          params[:tools] = tools.map(&:to_openai_tools).flatten
-          params[:tool_choice] = "auto"
-        elsif llm.is_a?(Langchain::LLM::Anthropic)
-          params[:tools] = tools.map(&:to_anthropic_tools).flatten
-          params[:system] = instructions if instructions
-          params[:tool_choice] = {type: "auto"}
-        elsif [Langchain::LLM::GoogleGemini, Langchain::LLM::GoogleVertexAI].include?(llm.class)
-          params[:tools] = tools.map(&:to_google_gemini_tools).flatten
-          params[:system] = instructions if instructions
-          params[:tool_choice] = "auto"
-        end
-        # TODO: Not sure that tool_choice should always be "auto"; Maybe we can let the user toggle it.
-      end
-
-      llm.chat(**params, &@stream)
+      params = @llm_adapter.build_chat_params(
+        tools: @tools,
+        instructions: @instructions,
+        messages: thread.array_of_message_hashes
+      )
+      @llm.chat(**params)
     end
 
     # Run the tools automatically
@@ -280,64 +277,16 @@ module Langchain
     def run_tools(tool_calls)
       # Iterate over each function invocation and submit tool output
       tool_calls.each do |tool_call|
-        tool_call_id, tool_name, method_name, tool_arguments = if llm.is_a?(Langchain::LLM::OpenAI)
-          extract_openai_tool_call(tool_call: tool_call)
-        elsif [Langchain::LLM::GoogleGemini, Langchain::LLM::GoogleVertexAI].include?(llm.class)
-          extract_google_gemini_tool_call(tool_call: tool_call)
-        elsif llm.is_a?(Langchain::LLM::Anthropic)
-          extract_anthropic_tool_call(tool_call: tool_call)
-        end
+        tool_call_id, tool_name, method_name, tool_arguments = @llm_adapter.extract_tool_call_args(tool_call: tool_call)
 
         tool_instance = tools.find do |t|
-          t.name == tool_name
+          t.class.tool_name == tool_name
         end or raise ArgumentError, "Tool not found in assistant.tools"
 
         output = tool_instance.send(method_name, **tool_arguments)
 
         submit_tool_output(tool_call_id: tool_call_id, output: output)
       end
-    end
-
-    # Extract the tool call information from the OpenAI tool call hash
-    #
-    # @param tool_call [Hash] The tool call hash
-    # @return [Array] The tool call information
-    def extract_openai_tool_call(tool_call:)
-      tool_call_id = tool_call.dig("id")
-
-      function_name = tool_call.dig("function", "name")
-      tool_name, method_name = function_name.split("__")
-      tool_arguments = JSON.parse(tool_call.dig("function", "arguments"), symbolize_names: true)
-
-      [tool_call_id, tool_name, method_name, tool_arguments]
-    end
-
-    # Extract the tool call information from the Anthropic tool call hash
-    #
-    # @param tool_call [Hash] The tool call hash, format: {"type"=>"tool_use", "id"=>"toolu_01TjusbFApEbwKPRWTRwzadR", "name"=>"news_retriever__get_top_headlines", "input"=>{"country"=>"us", "page_size"=>10}}], "stop_reason"=>"tool_use"}
-    # @return [Array] The tool call information
-    def extract_anthropic_tool_call(tool_call:)
-      tool_call_id = tool_call.dig("id")
-
-      function_name = tool_call.dig("name")
-      tool_name, method_name = function_name.split("__")
-      tool_arguments = tool_call.dig("input").transform_keys(&:to_sym)
-
-      [tool_call_id, tool_name, method_name, tool_arguments]
-    end
-
-    # Extract the tool call information from the Google Gemini tool call hash
-    #
-    # @param tool_call [Hash] The tool call hash, format: {"functionCall"=>{"name"=>"weather__execute", "args"=>{"input"=>"NYC"}}}
-    # @return [Array] The tool call information
-    def extract_google_gemini_tool_call(tool_call:)
-      tool_call_id = tool_call.dig("functionCall", "name")
-
-      function_name = tool_call.dig("functionCall", "name")
-      tool_name, method_name = function_name.split("__")
-      tool_arguments = tool_call.dig("functionCall", "args").transform_keys(&:to_sym)
-
-      [tool_call_id, tool_name, method_name, tool_arguments]
     end
 
     # Build a message
@@ -348,15 +297,181 @@ module Langchain
     # @param tool_call_id [String] The ID of the tool call to include in the message
     # @return [Langchain::Message] The Message object
     def build_message(role:, content: nil, tool_calls: [], tool_call_id: nil)
-      if llm.is_a?(Langchain::LLM::OpenAI)
-        Langchain::Messages::OpenAIMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
-      elsif [Langchain::LLM::GoogleGemini, Langchain::LLM::GoogleVertexAI].include?(llm.class)
-        Langchain::Messages::GoogleGeminiMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
-      elsif llm.is_a?(Langchain::LLM::Anthropic)
-        Langchain::Messages::AnthropicMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
-      end
+      @llm_adapter.build_message(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
+    end
+
+    # Increment the tokens count based on the last interaction with the LLM
+    #
+    # @param prompt_tokens [Integer] The number of used prmopt tokens
+    # @param completion_tokens [Integer] The number of used completion tokens
+    # @param total_tokens [Integer] The total number of used tokens
+    # @return [Integer] The current total tokens count
+    def record_used_tokens(prompt_tokens, completion_tokens, total_tokens_from_operation)
+      @total_prompt_tokens += prompt_tokens if prompt_tokens
+      @total_completion_tokens += completion_tokens if completion_tokens
+      @total_tokens += total_tokens_from_operation if total_tokens_from_operation
     end
 
     # TODO: Fix the message truncation when context window is exceeded
+
+    module LLM
+      class Adapter
+        def self.build(llm)
+          case llm
+          when Langchain::LLM::Ollama
+            Adapters::Ollama.new
+          when Langchain::LLM::OpenAI
+            Adapters::OpenAI.new
+          when Langchain::LLM::GoogleGemini, Langchain::LLM::GoogleVertexAI
+            Adapters::GoogleGemini.new
+          when Langchain::LLM::Anthropic
+            Adapters::Anthropic.new
+          else
+            raise ArgumentError, "Unsupported LLM type: #{llm.class}"
+          end
+        end
+      end
+
+      module Adapters
+        class Base
+          def build_chat_params(tools:, instructions:, messages:)
+            raise NotImplementedError, "Subclasses must implement build_chat_params"
+          end
+
+          def extract_tool_call_args(tool_call:)
+            raise NotImplementedError, "Subclasses must implement extract_tool_call_args"
+          end
+
+          def build_message(role:, content: nil, tool_calls: [], tool_call_id: nil)
+            raise NotImplementedError, "Subclasses must implement build_message"
+          end
+        end
+
+        class Ollama < Base
+          def build_chat_params(tools:, instructions:, messages:)
+            params = {messages: messages}
+            if tools.any?
+              params[:tools] = tools.map { |tool| tool.class.function_schemas.to_openai_format }.flatten
+            end
+            params
+          end
+
+          def build_message(role:, content: nil, tool_calls: [], tool_call_id: nil)
+            Langchain::Messages::OllamaMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
+          end
+
+          # Extract the tool call information from the OpenAI tool call hash
+          #
+          # @param tool_call [Hash] The tool call hash
+          # @return [Array] The tool call information
+          def extract_tool_call_args(tool_call:)
+            tool_call_id = tool_call.dig("id")
+
+            function_name = tool_call.dig("function", "name")
+            tool_name, method_name = function_name.split("__")
+
+            tool_arguments = tool_call.dig("function", "arguments")
+            tool_arguments = if tool_arguments.is_a?(Hash)
+              Langchain::Utils::HashTransformer.symbolize_keys(tool_arguments)
+            else
+              JSON.parse(tool_arguments, symbolize_names: true)
+            end
+
+            [tool_call_id, tool_name, method_name, tool_arguments]
+          end
+        end
+
+        class OpenAI < Base
+          def build_chat_params(tools:, instructions:, messages:)
+            params = {messages: messages}
+            if tools.any?
+              params[:tools] = tools.map { |tool| tool.class.function_schemas.to_openai_format }.flatten
+              params[:tool_choice] = "auto"
+            end
+            params
+          end
+
+          def build_message(role:, content: nil, tool_calls: [], tool_call_id: nil)
+            Langchain::Messages::OpenAIMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
+          end
+
+          # Extract the tool call information from the OpenAI tool call hash
+          #
+          # @param tool_call [Hash] The tool call hash
+          # @return [Array] The tool call information
+          def extract_tool_call_args(tool_call:)
+            tool_call_id = tool_call.dig("id")
+
+            function_name = tool_call.dig("function", "name")
+            tool_name, method_name = function_name.split("__")
+
+            tool_arguments = tool_call.dig("function", "arguments")
+            tool_arguments = if tool_arguments.is_a?(Hash)
+              Langchain::Utils::HashTransformer.symbolize_keys(tool_arguments)
+            else
+              JSON.parse(tool_arguments, symbolize_names: true)
+            end
+
+            [tool_call_id, tool_name, method_name, tool_arguments]
+          end
+        end
+
+        class GoogleGemini < Base
+          def build_chat_params(tools:, instructions:, messages:)
+            params = {messages: messages}
+            if tools.any?
+              params[:tools] = tools.map { |tool| tool.class.function_schemas.to_google_gemini_format }.flatten
+              params[:system] = instructions if instructions
+              params[:tool_choice] = "auto"
+            end
+            params
+          end
+
+          def build_message(role:, content: nil, tool_calls: [], tool_call_id: nil)
+            Langchain::Messages::GoogleGeminiMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
+          end
+
+          # Extract the tool call information from the Google Gemini tool call hash
+          #
+          # @param tool_call [Hash] The tool call hash, format: {"functionCall"=>{"name"=>"weather__execute", "args"=>{"input"=>"NYC"}}}
+          # @return [Array] The tool call information
+          def extract_tool_call_args(tool_call:)
+            tool_call_id = tool_call.dig("functionCall", "name")
+            function_name = tool_call.dig("functionCall", "name")
+            tool_name, method_name = function_name.split("__")
+            tool_arguments = tool_call.dig("functionCall", "args").transform_keys(&:to_sym)
+            [tool_call_id, tool_name, method_name, tool_arguments]
+          end
+        end
+
+        class Anthropic < Base
+          def build_chat_params(tools:, instructions:, messages:)
+            params = {messages: messages}
+            if tools.any?
+              params[:tools] = tools.map { |tool| tool.class.function_schemas.to_anthropic_format }.flatten
+              params[:tool_choice] = {type: "auto"}
+            end
+            params[:system] = instructions if instructions
+            params
+          end
+
+          def build_message(role:, content: nil, tool_calls: [], tool_call_id: nil)
+            Langchain::Messages::AnthropicMessage.new(role: role, content: content, tool_calls: tool_calls, tool_call_id: tool_call_id)
+          end
+
+          # Extract the tool call information from the Anthropic tool call hash
+          #
+          # @param tool_call [Hash] The tool call hash, format: {"type"=>"tool_use", "id"=>"toolu_01TjusbFApEbwKPRWTRwzadR", "name"=>"news_retriever__get_top_headlines", "input"=>{"country"=>"us", "page_size"=>10}}], "stop_reason"=>"tool_use"}
+          # @return [Array] The tool call information
+          def extract_tool_call_args(tool_call:)
+            tool_call_id = tool_call.dig("id")
+            function_name = tool_call.dig("name")
+            tool_name, method_name = function_name.split("__")
+            tool_arguments = tool_call.dig("input").transform_keys(&:to_sym)
+            [tool_call_id, tool_name, method_name, tool_arguments]
+          end
+        end
+      end
+    end
   end
 end

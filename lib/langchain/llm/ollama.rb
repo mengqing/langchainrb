@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "active_support/core_ext/hash"
-
 module Langchain::LLM
   # Interface to Ollama API.
   # Available models: https://ollama.ai/library
@@ -14,10 +12,10 @@ module Langchain::LLM
     attr_reader :url, :defaults
 
     DEFAULTS = {
-      temperature: 0.8,
-      completion_model_name: "llama3",
-      embeddings_model_name: "llama3",
-      chat_completion_model_name: "llama3"
+      temperature: 0.0,
+      completion_model_name: "llama3.1",
+      embeddings_model_name: "llama3.1",
+      chat_completion_model_name: "llama3.1"
     }.freeze
 
     EMBEDDING_SIZES = {
@@ -25,20 +23,24 @@ module Langchain::LLM
       "dolphin-mixtral": 4_096,
       llama2: 4_096,
       llama3: 4_096,
+      "llama3.1": 4_096,
       llava: 4_096,
       mistral: 4_096,
       "mistral-openorca": 4_096,
-      mixtral: 4_096
+      mixtral: 4_096,
+      tinydolphin: 2_048
     }.freeze
 
     # Initialize the Ollama client
     # @param url [String] The URL of the Ollama instance
+    # @param api_key [String] The API key to use. This is optional and used when you expose Ollama API using Open WebUI
     # @param default_options [Hash] The default options to use
     #
-    def initialize(url: "http://localhost:11434", default_options: {})
+    def initialize(url: "http://localhost:11434", api_key: nil, default_options: {})
       depends_on "faraday"
       @url = url
-      @defaults = DEFAULTS.deep_merge(default_options)
+      @api_key = api_key
+      @defaults = DEFAULTS.merge(default_options)
       chat_parameters.update(
         model: {default: @defaults[:chat_completion_model_name]},
         temperature: {default: @defaults[:temperature]},
@@ -113,7 +115,7 @@ module Langchain::LLM
         system: system,
         template: template,
         context: context,
-        stream: block.present?,
+        stream: block_given?, # rubocop:disable Performance/BlockGivenWithExplicitBlock
         raw: raw
       }.compact
 
@@ -173,7 +175,7 @@ module Langchain::LLM
     #   content: the content of the message
     #   images (optional): a list of images to include in the message (for multimodal models such as llava)
     def chat(messages:, model: nil, **params, &block)
-      parameters = chat_parameters.to_params(params.merge(messages:, model:, stream: block.present?))
+      parameters = chat_parameters.to_params(params.merge(messages:, model:, stream: block_given?)) # rubocop:disable Performance/BlockGivenWithExplicitBlock
       responses_stream = []
 
       client.post("api/chat", parameters) do |req|
@@ -264,11 +266,18 @@ module Langchain::LLM
     private
 
     def client
-      @client ||= Faraday.new(url: url) do |conn|
+      @client ||= Faraday.new(url: url, headers: auth_headers) do |conn|
         conn.request :json
         conn.response :json
         conn.response :raise_error
+        conn.response :logger, nil, {headers: true, bodies: true, errors: true}
       end
+    end
+
+    def auth_headers
+      return unless @api_key
+
+      {"Authorization" => "Bearer #{@api_key}"}
     end
 
     def json_responses_chunk_handler(&block)
@@ -288,13 +297,10 @@ module Langchain::LLM
       OllamaResponse.new(final_response, model: parameters[:model])
     end
 
+    # BUG: If streamed, this method does not currently return the tool_calls response.
     def generate_final_chat_completion_response(responses_stream, parameters)
-      final_response = responses_stream.last.merge(
-        "message" => {
-          "role" => "assistant",
-          "content" => responses_stream.map { |resp| resp.dig("message", "content") }.join
-        }
-      )
+      final_response = responses_stream.last
+      final_response["message"]["content"] = responses_stream.map { |resp| resp.dig("message", "content") }.join
 
       OllamaResponse.new(final_response, model: parameters[:model])
     end

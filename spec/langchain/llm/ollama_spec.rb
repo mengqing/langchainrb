@@ -3,7 +3,7 @@
 require "faraday"
 
 RSpec.describe Langchain::LLM::Ollama do
-  let(:subject) { described_class.new(url: "http://localhost:11434", default_options: {completion_model_name: "llama3", embeddings_model_name: "llama3"}) }
+  let(:subject) { described_class.new(url: "http://localhost:11434", default_options: {completion_model_name: "llama3.1", embeddings_model_name: "llama3.1"}) }
   let(:client) { subject.send(:client) }
 
   describe "#initialize" do
@@ -14,6 +14,12 @@ RSpec.describe Langchain::LLM::Ollama do
     it "initialize with default arguments" do
       expect { described_class.new }.not_to raise_error
       expect(described_class.new.url).to eq("http://localhost:11434")
+    end
+
+    it "sets auth headers if api_key is passed" do
+      subject = described_class.new(url: "http://localhost)", api_key: "abc123")
+
+      expect(subject.send(:client).headers).to include("Authorization" => "Bearer abc123")
     end
   end
 
@@ -123,7 +129,7 @@ RSpec.describe Langchain::LLM::Ollama do
 
   describe "#default_dimensions" do
     it "returns size of llama3 embeddings" do
-      subject = described_class.new(url: "http://localhost:11434", default_options: {embeddings_model_name: "llama3"})
+      subject = described_class.new(url: "http://localhost:11434", default_options: {embeddings_model_name: "llama3.1"})
 
       expect(subject.default_dimensions).to eq(4_096)
     end
