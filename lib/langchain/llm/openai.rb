@@ -17,7 +17,8 @@ module Langchain::LLM
       n: 1,
       temperature: 0.0,
       chat_completion_model_name: "gpt-4o-mini",
-      embeddings_model_name: "text-embedding-3-small"
+      embeddings_model_name: "text-embedding-3-small",
+      response_format: "text"
     }.freeze
 
     EMBEDDING_SIZES = {
