@@ -268,7 +268,7 @@ module Langchain
         instructions: @instructions,
         messages: thread.array_of_message_hashes
       )
-      @llm.chat(**params)
+      @llm.chat(**params, &@stream)
     end
 
     # Run the tools automatically
